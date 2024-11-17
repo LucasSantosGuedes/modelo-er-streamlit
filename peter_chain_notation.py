@@ -1,54 +1,85 @@
 import streamlit as st
-import networkx as nx
-import matplotlib.pyplot as plt
-from io import BytesIO
-import base64
+import requests
 
-st.set_page_config(page_title="Modelagem de Dados Conceitual", layout="wide")
-st.title("🗂️ Modelagem de Dados Conceitual com Notação de Peter Chen")
+st.set_page_config(page_title="Modelagem e Normalização de Dados", layout="wide")
+st.title("🗂️ Modelagem e Normalização de Dados com Notação de Peter Chen")
 
 # Função para gerar SQL
 def generate_sql(entities, relationships):
     sql_statements = []
     for entity, attrs in entities.items():
         sql = f"CREATE TABLE {entity} (\n"
-        primary_key = f"    {attrs[0].strip()}_id INT PRIMARY KEY,\n"  # Assume o primeiro atributo como PK
-        sql += primary_key
+        primary_key = attrs[0].strip()
+        sql += f"    {primary_key} INT PRIMARY KEY,\n"
         for attr in attrs[1:]:
             sql += f"    {attr.strip()} VARCHAR(255),\n"
         sql = sql.rstrip(",\n") + "\n);\n"
         sql_statements.append(sql)
-    
+
     # Adicionar relacionamentos
     for rel in relationships:
         if rel["Tipo de Relacionamento"] == "1:N":
             # Adicionar FK na tabela "N"
-            fk = f"ALTER TABLE {rel['Entidade 2']} ADD COLUMN {rel['Entidade 1'].lower()}_id INT,\n"
-            fk += f"    ADD FOREIGN KEY ({rel['Entidade 1'].lower()}_id) REFERENCES {rel['Entidade 1']}({entities[rel['Entidade 1']][0].strip()}_id);\n"
+            fk = f"ALTER TABLE {rel['Entidade 2']} ADD COLUMN {rel['Entidade 1']}_id INT;\n"
+            fk += f"ALTER TABLE {rel['Entidade 2']} ADD FOREIGN KEY ({rel['Entidade 1']}_id) REFERENCES {rel['Entidade 1']}({entities[rel['Entidade 1']][0].strip()});\n"
             sql_statements.append(fk)
         elif rel["Tipo de Relacionamento"] == "N:N":
             # Criar tabela associativa
             assoc_table = f"{rel['Entidade 1']}_{rel['Entidade 2']}"
             sql = f"CREATE TABLE {assoc_table} (\n"
-            sql += f"    {rel['Entidade 1'].lower()}_id INT,\n"
-            sql += f"    {rel['Entidade 2'].lower()}_id INT,\n"
-            sql += f"    PRIMARY KEY ({rel['Entidade 1'].lower()}_id, {rel['Entidade 2'].lower()}_id),\n"
-            sql += f"    FOREIGN KEY ({rel['Entidade 1'].lower()}_id) REFERENCES {rel['Entidade 1']}({entities[rel['Entidade 1']][0].strip()}_id),\n"
-            sql += f"    FOREIGN KEY ({rel['Entidade 2'].lower()}_id) REFERENCES {rel['Entidade 2']}({entities[rel['Entidade 2']][0].strip()}_id)\n"
+            sql += f"    {rel['Entidade 1']}_id INT,\n"
+            sql += f"    {rel['Entidade 2']}_id INT,\n"
+            sql += f"    PRIMARY KEY ({rel['Entidade 1']}_id, {rel['Entidade 2']}_id),\n"
+            sql += f"    FOREIGN KEY ({rel['Entidade 1']}_id) REFERENCES {rel['Entidade 1']}({entities[rel['Entidade 1']][0].strip()}),\n"
+            sql += f"    FOREIGN KEY ({rel['Entidade 2']}_id) REFERENCES {rel['Entidade 2']}({entities[rel['Entidade 2']][0].strip()})\n"
             sql += ");\n"
             sql_statements.append(sql)
     return "\n".join(sql_statements)
+
+# Função para gerar diagrama PlantUML
+def generate_plantuml_diagram(entities, relationships):
+    uml = "@startuml\n!define ER_TOP_DOWN\n' Configurações de estilo\nhide circle\nskinparam linetype ortho\n"
+    # Definir entidades e seus atributos
+    for entity, attrs in entities.items():
+        uml += f"entity \"{entity}\" as {entity} {{\n"
+        for attr in attrs:
+            if attr == attrs[0]:
+                uml += f"  * {attr}\n"  # Chave primária
+            else:
+                uml += f"  {attr}\n"
+        uml += "}\n"
+    # Definir relacionamentos
+    for rel in relationships:
+        ent1 = rel['Entidade 1']
+        ent2 = rel['Entidade 2']
+        rel_name = rel['Nome do Relacionamento']
+        rel_type = rel['Tipo de Relacionamento']
+        if rel_type == '1:1':
+            uml += f"{ent1} ||--|| {ent2} : \"{rel_name}\"\n"
+        elif rel_type == '1:N':
+            uml += f"{ent1} ||--o{{ {ent2} : \"{rel_name}\"\n"
+        elif rel_type == 'N:N':
+            uml += f"{ent1} }}o--o{{ {ent2} : \"{rel_name}\"\n"
+    uml += "@enduml"
+    return uml
 
 # Sessão 1: Definição das Entidades
 st.header("1. Definir Entidades")
 st.write("Insira as entidades principais (ex.: Cliente, Pedido) e seus atributos.")
 
+# Explicação opcional sobre Entidades
+with st.expander("📖 O que é uma Entidade?"):
+    st.write("""
+    Uma **entidade** é um objeto ou conceito sobre o qual você deseja armazenar informações no banco de dados.
+    Exemplos incluem **Cliente**, **Produto**, **Pedido**, etc.
+    """)
+
 if 'entities' not in st.session_state:
     st.session_state.entities = {}
 
 with st.form("entity_form", clear_on_submit=True):
-    entity_name = st.text_input("Nome da Entidade")
-    attributes = st.text_area("Atributos (separados por vírgula)", help="Exemplo: Nome, Email, Telefone")
+    entity_name = st.text_input("Nome da Entidade", placeholder="Exemplo: Cliente")
+    attributes = st.text_area("Atributos (separados por vírgula)", placeholder="Exemplo: id_cliente, Nome, Email")
     submitted = st.form_submit_button("Adicionar Entidade")
     if submitted:
         if entity_name and attributes:
@@ -74,6 +105,21 @@ if st.session_state.entities:
 st.header("2. Definir Relacionamentos")
 st.write("Escolha duas entidades e defina o tipo de relacionamento entre elas.")
 
+# Explicação opcional sobre Relacionamentos
+with st.expander("📖 O que é um Relacionamento?"):
+    st.write("""
+    Um **relacionamento** define como duas entidades estão associadas no modelo de dados.
+    Exemplos:
+    - Um **Cliente** faz um **Pedido**
+    - Um **Pedido** contém **Produtos**
+    - Um **Funcionário** gerencia um **Departamento**
+
+    **Tipos de Relacionamentos:**
+    - **1:1 (Um para Um):** Uma instância de uma entidade está relacionada a uma instância de outra entidade.
+    - **1:N (Um para Muitos):** Uma instância de uma entidade está relacionada a múltiplas instâncias de outra entidade.
+    - **N:N (Muitos para Muitos):** Múltiplas instâncias de uma entidade estão relacionadas a múltiplas instâncias de outra entidade.
+    """)
+
 if 'relationships' not in st.session_state:
     st.session_state.relationships = []
 
@@ -82,7 +128,20 @@ if st.session_state.entities:
         entity_1 = st.selectbox("Entidade 1", list(st.session_state.entities.keys()))
         entity_2 = st.selectbox("Entidade 2", list(st.session_state.entities.keys()))
         relationship_type = st.radio("Tipo de Relacionamento", ["1:1", "1:N", "N:N"])
-        relationship_name = st.text_input("Nome do Relacionamento", help="Exemplo: Realiza, Contém")
+        relationship_name = st.text_input(
+            "Nome do Relacionamento",
+            placeholder="Exemplo: realiza, contém, gerencia"
+        )
+        # Explicação opcional sobre o Nome do Relacionamento
+        with st.expander("📖 O que é o 'Nome do Relacionamento'?"):
+            st.write("""
+            O **"Nome do Relacionamento"** descreve como as duas entidades estão conectadas ou interagem no seu modelo de dados. Pense em verbos ou frases que indicam a ação ou a associação entre elas.
+
+            **Exemplos de Nomes de Relacionamento:**
+            - **Cliente** **realiza** **Pedido**
+            - **Pedido** **contém** **Produto**
+            - **Funcionário** **gerencia** **Departamento**
+            """)
         submitted_rel = st.form_submit_button("Adicionar Relacionamento")
         if submitted_rel:
             if entity_1 and entity_2 and relationship_name:
@@ -114,83 +173,70 @@ if st.session_state.relationships:
     for rel in st.session_state.relationships:
         st.markdown(f"**{rel['Entidade 1']}** {rel['Tipo de Relacionamento']} **{rel['Nome do Relacionamento']}** **{rel['Entidade 2']}**")
 
-# Função para converter figura para bytes
-def fig_to_bytes(fig):
-    buf = BytesIO()
-    fig.savefig(buf, format="png")
-    buf.seek(0)
-    return buf
-
 # Sessão 3: Gerar Diagrama e SQL
-st.header("3. Gerar Diagrama e SQL")
+st.header("3. Gerar Diagrama, Modelo Lógico e SQL")
 
 col1, col2 = st.columns(2)
 
 with col1:
-    if st.button("Gerar Diagrama"):
+    if st.button("Gerar Diagrama e Modelo Lógico"):
         if not st.session_state.entities:
             st.error("Adicione pelo menos uma entidade para gerar o diagrama.")
         else:
-            G = nx.DiGraph()
+            # Gerar Diagrama ER usando PlantUML via Kroki API
+            plantuml_code = generate_plantuml_diagram(st.session_state.entities, st.session_state.relationships)
+            st.session_state.plantuml_code = plantuml_code
 
-            # Adicionar entidades e seus atributos
+            # Enviar código para a API do Kroki
+            url = "https://kroki.io/plantuml/png"
+            response = requests.post(url, data=plantuml_code.encode('utf-8'))
+
+            if response.status_code == 200:
+                st.subheader("Diagrama ER")
+                st.image(response.content)
+                st.session_state.diagram_image = response.content  # Armazenar a imagem no session_state
+            else:
+                st.error("Erro ao gerar o diagrama.")
+
+            # Geração do Modelo Lógico
+            st.subheader("Modelo Lógico")
+            logical_model = ""
             for entity, attrs in st.session_state.entities.items():
-                G.add_node(entity, shape='rectangle', label=entity, type='entity')
+                logical_model += f"**Tabela `{entity}`**\n"
                 for attr in attrs:
-                    attr_node = f"{entity}_{attr}"
-                    G.add_node(attr_node, shape='ellipse', label=attr, type='attribute')
-                    G.add_edge(entity, attr_node)
-
-            # Adicionar relacionamentos entre entidades
+                    if attr == attrs[0]:
+                        logical_model += f"- `{attr}` (PRIMARY KEY)\n"
+                    else:
+                        logical_model += f"- `{attr}` VARCHAR(255)\n"
+                logical_model += "\n"
             for rel in st.session_state.relationships:
-                relationship_node = f"{rel['Entidade 1']}_{rel['Nome do Relacionamento']}_{rel['Entidade 2']}"
-                G.add_node(relationship_node, shape='diamond', label=rel['Nome do Relacionamento'], type='relationship', rel_type=rel['Tipo de Relacionamento'])
-                G.add_edge(rel["Entidade 1"], relationship_node, label=rel["Tipo de Relacionamento"])
-                G.add_edge(relationship_node, rel["Entidade 2"], label=rel["Tipo de Relacionamento"])
-
-            # Layout aprimorado
-            pos = nx.spring_layout(G, k=1, iterations=50)
-
-            plt.figure(figsize=(14, 10))
-            
-            # Desenhar nós por tipo
-            entity_nodes = [n for n, attr in G.nodes(data=True) if attr['type'] == 'entity']
-            attribute_nodes = [n for n, attr in G.nodes(data=True) if attr['type'] == 'attribute']
-            relationship_nodes = [n for n, attr in G.nodes(data=True) if attr['type'] == 'relationship']
-
-            nx.draw_networkx_nodes(G, pos, nodelist=entity_nodes, node_shape='s', node_color="skyblue", node_size=3000, label="Entidade")
-            nx.draw_networkx_nodes(G, pos, nodelist=attribute_nodes, node_shape='o', node_color="lightgreen", node_size=2000, label="Atributo")
-            nx.draw_networkx_nodes(G, pos, nodelist=relationship_nodes, node_shape='D', node_color="salmon", node_size=2500, label="Relacionamento")
-
-            # Desenhar arestas
-            nx.draw_networkx_edges(G, pos, arrows=True, arrowstyle='->', arrowsize=20, edge_color="gray")
-
-            # Desenhar rótulos
-            labels = {node: attr['label'] for node, attr in G.nodes(data=True)}
-            nx.draw_networkx_labels(G, pos, labels, font_size=10, font_family="sans-serif")
-
-            # Rótulos das arestas
-            edge_labels = {(u, v): data['label'] for u, v, data in G.edges(data=True) if 'label' in data}
-            nx.draw_networkx_edge_labels(G, pos, edge_labels=edge_labels, font_color="red", font_size=8)
-
-            plt.legend(scatterpoints=1, fontsize=12)
-            plt.axis('off')
-            
-            # Converter figura para bytes e armazenar no estado
-            buf = fig_to_bytes(plt)
-            st.session_state.diagram_bytes = buf.getvalue()
-            st.image(buf, caption="Diagrama ER Gerado", use_column_width=True)
+                if rel["Tipo de Relacionamento"] == "1:N":
+                    logical_model += f"- Chave estrangeira `{rel['Entidade 1']}_id` em `{rel['Entidade 2']}` referenciando `{rel['Entidade 1']}`\n"
+                elif rel["Tipo de Relacionamento"] == "N:N":
+                    logical_model += f"- Tabela associativa `{rel['Entidade 1']}_{rel['Entidade 2']}` com FKs para `{rel['Entidade 1']}` e `{rel['Entidade 2']}`\n"
+            st.markdown(logical_model)
+            st.session_state.logical_model = logical_model  # Armazenar o modelo lógico no session_state
+    else:
+        # Se o diagrama já foi gerado, exibi-lo
+        if 'diagram_image' in st.session_state:
+            st.subheader("Diagrama ER")
+            st.image(st.session_state.diagram_image)
+            st.subheader("Modelo Lógico")
+            st.markdown(st.session_state.logical_model)
+        else:
+            st.info("Clique em 'Gerar Diagrama e Modelo Lógico' para visualizar o diagrama.")
 
 with col2:
-    if 'diagram_bytes' in st.session_state:
+    if 'plantuml_code' in st.session_state:
+        # Botão para baixar o código PlantUML
         st.download_button(
-            label="🔽 Baixar Diagrama",
-            data=st.session_state.diagram_bytes,
-            file_name="diagrama_er.png",
-            mime="image/png"
+            label="🔽 Baixar Diagrama (PlantUML)",
+            data=st.session_state.plantuml_code,
+            file_name="diagrama_er.puml",
+            mime="text/plain"
         )
     else:
-        st.info("Clique em 'Gerar Diagrama' para visualizar e baixar o diagrama.")
+        st.info("Clique em 'Gerar Diagrama e Modelo Lógico' para visualizar e baixar o diagrama.")
 
     if st.button("Gerar SQL"):
         if not st.session_state.entities:
@@ -198,6 +244,7 @@ with col2:
         else:
             sql_script = generate_sql(st.session_state.entities, st.session_state.relationships)
             st.session_state.sql_script = sql_script
+            st.subheader("Script SQL")
             st.code(sql_script, language='sql')
             st.download_button(
                 label="🔽 Baixar SQL",
@@ -205,3 +252,8 @@ with col2:
                 file_name="modelagem.sql",
                 mime="text/plain"
             )
+    else:
+        # Se o SQL já foi gerado, exibi-lo
+        if 'sql_script' in st.session_state:
+            st.subheader("Script SQL")
+            st.code(st.session_state.sql_script, language='sql')
