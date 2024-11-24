@@ -2,58 +2,119 @@ import streamlit as st
 import requests
 
 st.set_page_config(page_title="Modelagem e Normalização de Dados", layout="wide")
-st.title("🗂️ DiagramaFácil")
+st.title("🗂️ Modelagem e Normalização de Dados com Notação de Peter Chen")
 
-# Função para gerar SQL
+# Função para gerar SQL no padrão Oracle
 def generate_sql(entities, relationships):
     sql_statements = []
-    for entity, attrs in entities.items():
-        sql = f"CREATE TABLE {entity} (\n"
-        primary_key = attrs[0].strip()
-        sql += f"    {primary_key} INT PRIMARY KEY,\n"
-        for attr in attrs[1:]:
-            sql += f"    {attr.strip()} VARCHAR(255),\n"
-        sql = sql.rstrip(",\n") + "\n);\n"
+    sequence_statements = []
+    for entity_name, entity in entities.items():
+        attrs = entity['attributes']
+        is_weak = entity['is_weak']
+        supertype = entity['supertype']
+        subtypes = entity['subtypes']
+        
+        sql = f"CREATE TABLE {entity_name} (\n"
+        pk_attrs = [attr['name'] for attr in attrs if attr['is_primary_key']]
+        fk_statements = []
+        for attr in attrs:
+            line = f"    {attr['name']} {attr['data_type']}"
+            if attr['is_primary_key'] and not is_weak:
+                line += " PRIMARY KEY"
+            if attr['is_multivalued']:
+                # Em Oracle, atributos multivalorados podem ser modelados em tabelas separadas
+                multivalued_table = f"{entity_name}_{attr['name']}"
+                multivalued_sql = f"CREATE TABLE {multivalued_table} (\n"
+                multivalued_sql += f"    {entity_name}_id {entities[entity_name]['primary_key_type']},\n"
+                multivalued_sql += f"    {attr['name']} {attr['data_type']},\n"
+                multivalued_sql += f"    FOREIGN KEY ({entity_name}_id) REFERENCES {entity_name}({pk_attrs[0]})\n"
+                multivalued_sql += ");\n"
+                sql_statements.append(multivalued_sql)
+                continue  # Não incluir o atributo na tabela principal
+            if attr['is_derived']:
+                # Atributos derivados não são armazenados no banco, podem ser calculados via VIEW
+                continue
+            sql += line + ",\n"
+            if attr['is_foreign_key']:
+                fk = f"FOREIGN KEY ({attr['name']}) REFERENCES {attr['references']}({attr['referenced_attr']})"
+                fk_statements.append(fk)
+        # Remover a última vírgula
+        sql = sql.rstrip(",\n") + "\n"
+        if is_weak:
+            # Chave primária composta para entidades fracas
+            pk = ", ".join(pk_attrs)
+            sql += f",    PRIMARY KEY ({pk})\n"
+        if fk_statements:
+            sql += ",\n    " + ",\n    ".join(fk_statements) + "\n"
+        sql += ");\n"
         sql_statements.append(sql)
+
+        # Criar sequência para chave primária se for numérica
+        for attr in attrs:
+            if attr['is_primary_key'] and attr['data_type'].upper() in ('NUMBER', 'INT', 'INTEGER'):
+                sequence_name = f"{entity_name}_{attr['name']}_seq"
+                sequence_sql = f"CREATE SEQUENCE {sequence_name} START WITH 1 INCREMENT BY 1 NOCACHE NOCYCLE;"
+                sequence_statements.append(sequence_sql)
+                break  # Considerando apenas uma sequência por tabela
 
     # Adicionar relacionamentos
     for rel in relationships:
-        if rel["Tipo de Relacionamento"] == "1:N":
+        if rel["relationship_type"] == "1:N":
             # Adicionar FK na tabela "N"
-            fk = f"ALTER TABLE {rel['Entidade 2']} ADD COLUMN {rel['Entidade 1']}_id INT;\n"
-            fk += f"ALTER TABLE {rel['Entidade 2']} ADD FOREIGN KEY ({rel['Entidade 1']}_id) REFERENCES {rel['Entidade 1']}({entities[rel['Entidade 1']][0].strip()});\n"
-            sql_statements.append(fk)
-        elif rel["Tipo de Relacionamento"] == "N:N":
+            fk_attr = f"{rel['entity1']}_id"
+            fk_sql = f"ALTER TABLE {rel['entity2']} ADD ({fk_attr} {entities[rel['entity1']]['primary_key_type']});\n"
+            fk_sql += f"ALTER TABLE {rel['entity2']} ADD CONSTRAINT fk_{rel['entity2']}_{rel['entity1']} FOREIGN KEY ({fk_attr}) REFERENCES {rel['entity1']}({entities[rel['entity1']]['primary_key']});\n"
+            sql_statements.append(fk_sql)
+        elif rel["relationship_type"] == "N:N":
             # Criar tabela associativa
-            assoc_table = f"{rel['Entidade 1']}_{rel['Entidade 2']}"
+            assoc_table = f"{rel['entity1']}_{rel['entity2']}"
+            pk1 = entities[rel['entity1']]['primary_key']
+            pk2 = entities[rel['entity2']]['primary_key']
+            pk1_type = entities[rel['entity1']]['primary_key_type']
+            pk2_type = entities[rel['entity2']]['primary_key_type']
             sql = f"CREATE TABLE {assoc_table} (\n"
-            sql += f"    {rel['Entidade 1']}_id INT,\n"
-            sql += f"    {rel['Entidade 2']}_id INT,\n"
-            sql += f"    PRIMARY KEY ({rel['Entidade 1']}_id, {rel['Entidade 2']}_id),\n"
-            sql += f"    FOREIGN KEY ({rel['Entidade 1']}_id) REFERENCES {rel['Entidade 1']}({entities[rel['Entidade 1']][0].strip()}),\n"
-            sql += f"    FOREIGN KEY ({rel['Entidade 2']}_id) REFERENCES {rel['Entidade 2']}({entities[rel['Entidade 2']][0].strip()})\n"
+            sql += f"    {rel['entity1']}_id {pk1_type},\n"
+            sql += f"    {rel['entity2']}_id {pk2_type},\n"
+            sql += f"    PRIMARY KEY ({rel['entity1']}_id, {rel['entity2']}_id),\n"
+            sql += f"    FOREIGN KEY ({rel['entity1']}_id) REFERENCES {rel['entity1']}({pk1}),\n"
+            sql += f"    FOREIGN KEY ({rel['entity2']}_id) REFERENCES {rel['entity2']}({pk2})\n"
             sql += ");\n"
             sql_statements.append(sql)
-    return "\n".join(sql_statements)
+        elif rel["relationship_type"] == "1:1":
+            # Em relacionamentos 1:1, a chave estrangeira pode ficar em qualquer tabela
+            fk_attr = f"{rel['entity1']}_id"
+            fk_sql = f"ALTER TABLE {rel['entity2']} ADD ({fk_attr} {entities[rel['entity1']]['primary_key_type']} UNIQUE);\n"
+            fk_sql += f"ALTER TABLE {rel['entity2']} ADD CONSTRAINT fk_{rel['entity2']}_{rel['entity1']} FOREIGN KEY ({fk_attr}) REFERENCES {rel['entity1']}({entities[rel['entity1']]['primary_key']});\n"
+            sql_statements.append(fk_sql)
+    # Retornar sequência e statements
+    return "\n".join(sequence_statements + sql_statements)
 
 # Função para gerar diagrama PlantUML
 def generate_plantuml_diagram(entities, relationships):
     uml = "@startuml\n!define ER_TOP_DOWN\n' Configurações de estilo\nhide circle\nskinparam linetype ortho\n"
     # Definir entidades e seus atributos
-    for entity, attrs in entities.items():
-        uml += f"entity \"{entity}\" as {entity} {{\n"
+    for entity_name, entity in entities.items():
+        attrs = entity['attributes']
+        uml += f"entity \"{entity_name}\" as {entity_name} {{\n"
         for attr in attrs:
-            if attr == attrs[0]:
-                uml += f"  * {attr}\n"  # Chave primária
+            if attr['is_primary_key']:
+                uml += f"  * {attr['name']} : {attr['data_type']}\n"  # Chave primária
+            elif attr['is_foreign_key']:
+                uml += f"  + {attr['name']} : {attr['data_type']}\n"  # Chave estrangeira
             else:
-                uml += f"  {attr}\n"
+                uml += f"  {attr['name']} : {attr['data_type']}\n"
         uml += "}\n"
+        # Generalização/especialização
+        if entity['supertype']:
+            uml += f"{entity_name} --|> {entity['supertype']}\n"
+        for subtype in entity['subtypes']:
+            uml += f"{subtype} --|> {entity_name}\n"
     # Definir relacionamentos
     for rel in relationships:
-        ent1 = rel['Entidade 1']
-        ent2 = rel['Entidade 2']
-        rel_name = rel['Nome do Relacionamento']
-        rel_type = rel['Tipo de Relacionamento']
+        ent1 = rel['entity1']
+        ent2 = rel['entity2']
+        rel_name = rel['relationship_name']
+        rel_type = rel['relationship_type']
         if rel_type == '1:1':
             uml += f"{ent1} ||--|| {ent2} : \"{rel_name}\"\n"
         elif rel_type == '1:N':
@@ -65,7 +126,7 @@ def generate_plantuml_diagram(entities, relationships):
 
 # Sessão 1: Definição das Entidades
 st.header("1. Definir Entidades")
-st.write("Insira as entidades principais (ex.: Cliente, Pedido) e seus atributos.")
+st.write("Insira as entidades principais e suas características.")
 
 # Explicação opcional sobre Entidades
 with st.expander("📖 O que é uma Entidade?"):
@@ -79,27 +140,83 @@ if 'entities' not in st.session_state:
 
 with st.form("entity_form", clear_on_submit=True):
     entity_name = st.text_input("Nome da Entidade", placeholder="Exemplo: Cliente")
-    attributes = st.text_area("Atributos (separados por vírgula)", placeholder="Exemplo: id_cliente, Nome, Email")
+    is_weak = st.checkbox("Entidade Fraca?")
+    supertype = st.selectbox("Especialização de", ["Nenhum"] + list(st.session_state.entities.keys()))
     submitted = st.form_submit_button("Adicionar Entidade")
     if submitted:
-        if entity_name and attributes:
+        if entity_name:
             if entity_name in st.session_state.entities:
                 st.warning(f"A entidade '{entity_name}' já existe.")
             else:
-                attrs_list = [attr.strip() for attr in attributes.split(",") if attr.strip()]
-                if len(attrs_list) == 0:
-                    st.error("Por favor, insira pelo menos um atributo válido.")
-                else:
-                    st.session_state.entities[entity_name] = attrs_list
-                    st.success(f"Entidade '{entity_name}' adicionada com sucesso!")
+                st.session_state.entities[entity_name] = {
+                    'attributes': [],
+                    'is_weak': is_weak,
+                    'supertype': supertype if supertype != "Nenhum" else None,
+                    'subtypes': [],
+                    'primary_key': None,
+                    'primary_key_type': None
+                }
+                if supertype != "Nenhum":
+                    st.session_state.entities[supertype]['subtypes'].append(entity_name)
+                st.success(f"Entidade '{entity_name}' adicionada com sucesso!")
         else:
-            st.error("Por favor, preencha o nome da entidade e seus atributos.")
+            st.error("Por favor, preencha o nome da entidade.")
 
-# Exibir entidades definidas
+# Sessão para adicionar atributos às entidades
+st.header("1.1. Definir Atributos das Entidades")
+st.write("Adicione atributos às entidades definidas.")
+
 if st.session_state.entities:
-    st.subheader("Entidades Definidas:")
-    for entity, attrs in st.session_state.entities.items():
-        st.markdown(f"**{entity}**: {', '.join(attrs)}")
+    entity_to_edit = st.selectbox("Selecionar Entidade", list(st.session_state.entities.keys()))
+    with st.form("attribute_form", clear_on_submit=True):
+        attr_name = st.text_input("Nome do Atributo", placeholder="Exemplo: id_cliente")
+        attr_type = st.selectbox("Tipo de Dado", ["VARCHAR2(255)", "NUMBER", "DATE", "CHAR(1)", "CLOB", "BLOB"])
+        is_primary_key = st.checkbox("Chave Primária?")
+        is_foreign_key = st.checkbox("Chave Estrangeira?")
+        is_multivalued = st.checkbox("Atributo Multivalorado?")
+        is_derived = st.checkbox("Atributo Derivado?")
+        submitted_attr = st.form_submit_button("Adicionar Atributo")
+        if submitted_attr:
+            if attr_name and attr_type:
+                attribute = {
+                    'name': attr_name,
+                    'data_type': attr_type,
+                    'is_primary_key': is_primary_key,
+                    'is_foreign_key': is_foreign_key,
+                    'is_multivalued': is_multivalued,
+                    'is_derived': is_derived,
+                    'references': None,
+                    'referenced_attr': None
+                }
+                if is_primary_key:
+                    if st.session_state.entities[entity_to_edit]['primary_key']:
+                        st.warning(f"A entidade '{entity_to_edit}' já possui uma chave primária.")
+                    else:
+                        st.session_state.entities[entity_to_edit]['primary_key'] = attr_name
+                        st.session_state.entities[entity_to_edit]['primary_key_type'] = attr_type
+                if is_foreign_key:
+                    ref_entity = st.selectbox("Referenciar Entidade", list(st.session_state.entities.keys()))
+                    ref_attr = st.selectbox("Referenciar Atributo", [attr['name'] for attr in st.session_state.entities[ref_entity]['attributes'] if attr['is_primary_key']])
+                    attribute['references'] = ref_entity
+                    attribute['referenced_attr'] = ref_attr
+                st.session_state.entities[entity_to_edit]['attributes'].append(attribute)
+                st.success(f"Atributo '{attr_name}' adicionado à entidade '{entity_to_edit}'.")
+            else:
+                st.error("Por favor, preencha o nome do atributo e selecione o tipo de dado.")
+
+    # Exibir atributos da entidade selecionada
+    st.subheader(f"Atributos da Entidade '{entity_to_edit}':")
+    for attr in st.session_state.entities[entity_to_edit]['attributes']:
+        details = f"{attr['name']} ({attr['data_type']})"
+        if attr['is_primary_key']:
+            details += " [PK]"
+        if attr['is_foreign_key']:
+            details += f" [FK -> {attr['references']}({attr['referenced_attr']})]"
+        if attr['is_multivalued']:
+            details += " [Multivalorado]"
+        if attr['is_derived']:
+            details += " [Derivado]"
+        st.write(details)
 
 # Sessão 2: Definir Relacionamentos
 st.header("2. Definir Relacionamentos")
@@ -123,7 +240,7 @@ with st.expander("📖 O que é um Relacionamento?"):
 if 'relationships' not in st.session_state:
     st.session_state.relationships = []
 
-if st.session_state.entities:
+if len(st.session_state.entities) >= 2:
     with st.form("relationship_form", clear_on_submit=True):
         entity_1 = st.selectbox("Entidade 1", list(st.session_state.entities.keys()))
         entity_2 = st.selectbox("Entidade 2", list(st.session_state.entities.keys()))
@@ -132,6 +249,8 @@ if st.session_state.entities:
             "Nome do Relacionamento",
             placeholder="Exemplo: realiza, contém, gerencia"
         )
+        participation = st.radio("Participação da Entidade 1", ["Total", "Parcial"])
+        participation2 = st.radio("Participação da Entidade 2", ["Total", "Parcial"])
         # Explicação opcional sobre o Nome do Relacionamento
         with st.expander("📖 O que é o 'Nome do Relacionamento'?"):
             st.write("""
@@ -151,17 +270,19 @@ if st.session_state.entities:
                     # Verificar se o relacionamento já existe
                     exists = False
                     for rel in st.session_state.relationships:
-                        if (rel["Entidade 1"] == entity_1 and rel["Entidade 2"] == entity_2 and rel["Nome do Relacionamento"] == relationship_name):
+                        if (rel["entity1"] == entity_1 and rel["entity2"] == entity_2 and rel["relationship_name"] == relationship_name):
                             exists = True
                             break
                     if exists:
                         st.warning("Este relacionamento já foi adicionado.")
                     else:
                         st.session_state.relationships.append({
-                            "Entidade 1": entity_1,
-                            "Entidade 2": entity_2,
-                            "Nome do Relacionamento": relationship_name,
-                            "Tipo de Relacionamento": relationship_type
+                            "entity1": entity_1,
+                            "entity2": entity_2,
+                            "relationship_name": relationship_name,
+                            "relationship_type": relationship_type,
+                            "participation": participation,
+                            "participation2": participation2
                         })
                         st.success(f"Relacionamento '{entity_1} - {relationship_name} - {entity_2}' adicionado com sucesso!")
             else:
@@ -171,7 +292,7 @@ if st.session_state.entities:
 if st.session_state.relationships:
     st.subheader("Relacionamentos Definidos:")
     for rel in st.session_state.relationships:
-        st.markdown(f"**{rel['Entidade 1']}** {rel['Tipo de Relacionamento']} **{rel['Nome do Relacionamento']}** **{rel['Entidade 2']}**")
+        st.markdown(f"**{rel['entity1']}** ({rel['participation']}) {rel['relationship_type']} **{rel['relationship_name']}** **{rel['entity2']}** ({rel['participation2']})")
 
 # Sessão 3: Gerar Diagrama e SQL
 st.header("3. Gerar Diagrama, Modelo Lógico e SQL")
@@ -201,19 +322,25 @@ with col1:
             # Geração do Modelo Lógico
             st.subheader("Modelo Lógico")
             logical_model = ""
-            for entity, attrs in st.session_state.entities.items():
-                logical_model += f"**Tabela `{entity}`**\n"
-                for attr in attrs:
-                    if attr == attrs[0]:
-                        logical_model += f"- `{attr}` (PRIMARY KEY)\n"
-                    else:
-                        logical_model += f"- `{attr}` VARCHAR(255)\n"
+            for entity_name, entity in st.session_state.entities.items():
+                logical_model += f"**Tabela `{entity_name}`**\n"
+                for attr in entity['attributes']:
+                    details = f"- `{attr['name']}` {attr['data_type']}"
+                    if attr['is_primary_key']:
+                        details += " (PRIMARY KEY)"
+                    if attr['is_foreign_key']:
+                        details += f" (FOREIGN KEY -> `{attr['references']}`)"
+                    if attr['is_multivalued']:
+                        details += " (Multivalorado)"
+                    if attr['is_derived']:
+                        details += " (Derivado)"
+                    logical_model += details + "\n"
                 logical_model += "\n"
             for rel in st.session_state.relationships:
-                if rel["Tipo de Relacionamento"] == "1:N":
-                    logical_model += f"- Chave estrangeira `{rel['Entidade 1']}_id` em `{rel['Entidade 2']}` referenciando `{rel['Entidade 1']}`\n"
-                elif rel["Tipo de Relacionamento"] == "N:N":
-                    logical_model += f"- Tabela associativa `{rel['Entidade 1']}_{rel['Entidade 2']}` com FKs para `{rel['Entidade 1']}` e `{rel['Entidade 2']}`\n"
+                if rel["relationship_type"] == "1:N":
+                    logical_model += f"- Chave estrangeira `{rel['entity1']}_id` em `{rel['entity2']}` referenciando `{rel['entity1']}`\n"
+                elif rel["relationship_type"] == "N:N":
+                    logical_model += f"- Tabela associativa `{rel['entity1']}_{rel['entity2']}` com FKs para `{rel['entity1']}` e `{rel['entity2']}`\n"
             st.markdown(logical_model)
             st.session_state.logical_model = logical_model  # Armazenar o modelo lógico no session_state
     else:
