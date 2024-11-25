@@ -2,7 +2,7 @@ import streamlit as st
 import requests
 
 st.set_page_config(page_title="Modelagem e Normalização de Dados", layout="wide")
-st.title("🗂️ Modelagem e Normalização de Dados com Notação de Peter Chen")
+st.title("🗂️ Diagrama Fácil")
 
 # Função para gerar SQL no padrão Oracle
 def generate_sql(entities, relationships):
